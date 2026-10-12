@@ -86,6 +86,27 @@ journalctl -u powerpal-bridge -f
 
 ## How it works
 
+```mermaid
+flowchart TD
+    A[Start] --> B["Scan until the configured MAC is found"]
+    B --> C["Connect over BLE"]
+    C --> D["Write pairing code to 59DA0011 - unlocks the device"]
+    D --> E["Set batch window via 59DA0013 - default 1 min"]
+    E --> F["Subscribe to measurement notifications 59DA0001"]
+    F --> G["Notification received: unix_ts + pulses"]
+    G --> H{"Future-dated, stale or duplicate?"}
+    H -->|skip| G
+    H -->|valid| I["Convert pulses to kWh + average watts"]
+    I --> J["POST to INGEST_URL with X-API-Key"]
+    J -->|success| K["Server stores reading - dedup by time"]
+    J -->|failure| L["Queue in outbox - retried with next batch"]
+    L --> G
+    K --> G
+    G -->|"device drops: auto-reconnect"| C
+```
+
+**The flow, step by step:**
+
 1. Scans until it finds the configured MAC
 2. Connects (pairs first on Windows), writes the pairing code to the
    pairing characteristic (`59DA0011`) — everything else stays locked
