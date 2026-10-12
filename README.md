@@ -1,12 +1,8 @@
 # powerpal-bridge
 
 Reads live power readings from a [Powerpal](https://powerpal.net) energy
-monitor over Bluetooth LE and streams them to the console.
-
-> **Roadmap:** posting readings to
-> [home-energy-server](https://github.com/benedict-chng/home-energy-server)
-> (its idempotent ingest API) is the next milestone — the BLE streaming
-> layer below is the proven foundation.
+monitor over Bluetooth LE and posts them to
+[home-energy-server](https://github.com/benedict-chng/home-energy-server).
 
 ## Requirements
 
@@ -46,6 +42,9 @@ environment variables still take precedence.
 | `INTERVAL_MINUTES` | Measurement batch window in minutes, 1–15 (default `1`) |
 | `LIVE_PULSE` | `true` = per-pulse instantaneous watts (chews the Powerpal battery) — default `false` |
 | `RETRY_DELAY` | Seconds between reconnect attempts (default `15`) |
+| `INGEST_URL` | `http://192.168.68.141:8000/api/v1/readings` — home-energy-server ingest endpoint |
+| `INGEST_API_KEY` | *(required for posting)* — the server's ingest API key |
+| `STALE_SECONDS` | `300` — discard readings older than this (historic-replay filter) |
 
 ## Run
 
@@ -96,11 +95,12 @@ journalctl -u powerpal-bridge -f
    `[unix_ts: uint32 LE][pulses: uint16 LE][...]`
 5. `LIVE_PULSE=true` additionally subscribes to per-pulse notifications
    (`59DA0003`) for instantaneous watts
-
-## Roadmap
-
-- Wire the measurement stream into home-energy-server's ingest API
-  (`POST /api/v1/readings` — idempotent, keyed by time)
+6. Each accepted reading is POSTed to `INGEST_URL` with your
+   `INGEST_API_KEY` — the server deduplicates by time, so retries never
+   create duplicates. Failed posts queue in memory (~12 h) and retry
+   with the next batch. Readings older than `STALE_SECONDS` or
+   future-dated are discarded — the device replays stored history when
+   its batch window is reduced.
 
 ## Protocol reference
 

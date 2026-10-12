@@ -16,11 +16,14 @@ Linux run:
 """
 
 import asyncio
+import json
 import os
 import struct
 import time
 import sys
-from datetime import datetime
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 from bleak import BleakScanner, BleakClient
@@ -43,7 +46,14 @@ PULSES_PER_KWH   = _env_int("PULSES_PER_KWH", 3200)
 INTERVAL_MINUTES = _env_int("INTERVAL_MINUTES", 1)   # batch size in minutes (1-15)
 LIVE_PULSE       = _env_bool("LIVE_PULSE", False)    # per-pulse watts (more battery)
 RETRY_DELAY      = _env_int("RETRY_DELAY", 15)       # seconds between reconnects
+
+INGEST_URL       = os.environ.get("INGEST_URL", "http://192.168.68.141:8000/api/v1/readings")
+INGEST_API_KEY   = os.environ.get("INGEST_API_KEY", "")
+STALE_SECONDS    = _env_int("STALE_SECONDS", 300)    # discard readings older than this
 # ------------------------------------------------------------------------------
+
+if not INGEST_API_KEY:
+    print("NOTE: INGEST_API_KEY not set -- readings will only be shown, not posted.")
 
 CHAR_MEASUREMENT  = "59DA0001-12F4-25A6-7D4F-55961DCE4205"
 CHAR_TIME         = "59DA0004-12F4-25A6-7D4F-55961DCE4205"
@@ -63,6 +73,48 @@ def dec_u16(d):  return struct.unpack("<H", d[:2])[0]
 def dec_u32(d):  return struct.unpack("<I", d[:4])[0]
 def dec_i8(d):   return struct.unpack("<b", d[:1])[0]
 
+# -- Ingest POST ----------------------------------------------------------------
+_outbox  = []
+_last_ts = 0
+
+def post_reading(payload):
+    """POST one reading to the ingest API. Returns True on success."""
+    req = urllib.request.Request(
+        INGEST_URL,
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json", "X-API-Key": INGEST_API_KEY},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            ok = 200 <= resp.status < 300
+            if not ok:
+                print("  [INGEST] HTTP %s" % resp.status)
+            return ok
+    except urllib.error.HTTPError as e:
+        print("  [INGEST] HTTP error %s: %s" % (e.code, e.reason))
+        return False
+    except urllib.error.URLError as e:
+        print("  [INGEST] server unreachable: %s" % e.reason)
+        return False
+    except Exception as e:
+        print("  [INGEST] unexpected error: %s" % e)
+        return False
+
+def send_reading(payload):
+    """Post one reading; on failure, queue it for retry after the next one."""
+    if post_reading(payload):
+        while _outbox:
+            if not post_reading(_outbox[0]):
+                break
+            _outbox.pop(0)
+        return
+    _outbox.append(payload)
+    if len(_outbox) > 720:  # ~12 h of minute data, then drop the oldest
+        dropped = _outbox.pop(0)
+        print("  [INGEST] outbox overflow, dropping reading at %s" % dropped["time"])
+    print("  [INGEST] queued for retry (%d in outbox)" % len(_outbox))
+
 def ms_to_watts(millis):
     if millis <= 0:
         return 0.0
@@ -79,15 +131,36 @@ _pulse_count = 0
 
 # -- Callbacks -----------------------------------------------------------------
 def on_measurement(sender, data):
-    global _meas_count
+    global _meas_count, _last_ts
     _meas_count += 1
     ts     = dec_u32(data[0:4])
     pulses = dec_u16(data[4:6]) if len(data) >= 6 else 0
+
+    now = int(time.time())
+    if ts > now + 120:
+        print("  [%s] skipped future-dated reading (ts=%d)" % (datetime.now().strftime("%H:%M:%S"), ts))
+        return
+    if now - ts > STALE_SECONDS:
+        print("  [%s] skipped stale/historic reading (ts=%d, %ds old)" % (datetime.now().strftime("%H:%M:%S"), ts, now - ts))
+        return
+    if _last_ts and ts <= _last_ts:
+        print("  [%s] skipped duplicate/out-of-order reading (ts=%d)" % (datetime.now().strftime("%H:%M:%S"), ts))
+        return
+    _last_ts = ts
+
     kwh    = pulses / PULSES_PER_KWH
     watts  = pulses_to_watts(pulses)
     dt     = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
-    now    = datetime.now().strftime("%H:%M:%S")
-    print("  [%s] #%4d  device_ts=%s  pulses=%5d  %.4f kWh  %8.1f W avg" % (now, _meas_count, dt, pulses, kwh, watts))
+    print("  [%s] #%4d  device_ts=%s  pulses=%5d  %.4f kWh  %8.1f W avg" % (datetime.now().strftime("%H:%M:%S"), _meas_count, dt, pulses, kwh, watts))
+
+    if not INGEST_API_KEY:
+        return  # console-only mode
+    send_reading({
+        "time": datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(),
+        "pulses": pulses,
+        "kwh": round(kwh, 6),
+        "average_watts": round(watts, 3),
+    })
 
 def on_pulse(sender, data):
     global _pulse_count
@@ -193,6 +266,7 @@ async def main():
     print("  Pairing code   : %d" % PAIRING_CODE)
     print("  Pulses/kWh     : %d" % PULSES_PER_KWH)
     print("  Interval       : %d min" % INTERVAL_MINUTES)
+    print("  Ingest         : %s" % (INGEST_URL if INGEST_API_KEY else "disabled (no INGEST_API_KEY)"))
     print("  Platform       : %s" % ("Windows" if sys.platform == "win32" else "Linux"))
     print()
 
