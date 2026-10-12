@@ -123,9 +123,7 @@ flowchart TD
    future-dated are discarded — the device replays stored history when
    its batch window is reduced.
 
-## Protocol reference
+## Reference & credits
 
-Big credit to [WeekendWarrior1/powerpal_ble](https://github.com/WeekendWarrior1/powerpal_ble)
-for the BLE reverse-engineering, and
-[pento/powerpal-esphome](https://github.com/pento/powerpal-esphome) for a
-working reference implementation.
+- [Sage222/SagePowerPalStandalone](https://github.com/Sage222/SagePowerPalStandalone) —
+  the standalone Powerpal BLE gateway this bridge is based on

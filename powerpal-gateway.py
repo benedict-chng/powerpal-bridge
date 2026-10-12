@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Powerpal BLE Client -- Standalone, Cross-platform (Windows/Linux)
-Protocol reference: https://github.com/WeekendWarrior1/powerpal_ble
+Based on: https://github.com/Sage222/SagePowerPalStandalone
 
 Runs fully automatically -- no prompts. Edit the config block below.
 Keeps scanning until the Powerpal is found, then connects and streams.
