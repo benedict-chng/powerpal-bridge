@@ -49,7 +49,7 @@ environment variables still take precedence.
 ## Run
 
 ```bash
-.venv/bin/python powerpal-gateway.py
+.venv/bin/python powerpal-bridge.py
 ```
 
 On the first connect you'll get a device info panel (serial, firmware,
@@ -68,7 +68,7 @@ After=network.target bluetooth.target
 [Service]
 User=pi
 WorkingDirectory=/home/pi/powerpal-bridge
-ExecStart=/home/pi/powerpal-bridge/.venv/bin/python powerpal-gateway.py
+ExecStart=/home/pi/powerpal-bridge/.venv/bin/python powerpal-bridge.py
 Restart=always
 RestartSec=10
 
