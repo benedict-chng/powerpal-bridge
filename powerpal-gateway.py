@@ -16,19 +16,33 @@ Linux run:
 """
 
 import asyncio
+import os
 import struct
 import time
 import sys
 from datetime import datetime
+
+from dotenv import load_dotenv
 from bleak import BleakScanner, BleakClient
 
-# -- Config -- edit these ------------------------------------------------------
-POWERPAL_MAC     = "D8:3F:AE:A6:FD:45"
-PAIRING_CODE     = 411758
-PULSES_PER_KWH   = 3200
-INTERVAL_MINUTES = 1      # measurement batch size in minutes (1-15)
-LIVE_PULSE       = False  # True = per-pulse instantaneous watts (uses more battery)
-RETRY_DELAY      = 15     # seconds between reconnect attempts
+load_dotenv()  # reads .env from the working directory (see .env.example)
+
+
+# -- Config -- from .env / environment (see .env.example) -----------------------
+def _env_int(name: str, default: int) -> int:
+    return int(os.environ.get(name, str(default)))
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    return os.environ.get(name, str(default)).strip().lower() in ("1", "true", "yes", "on")
+
+
+POWERPAL_MAC     = os.environ.get("POWERPAL_MAC", "D8:3F:AE:A6:FD:45")
+PAIRING_CODE     = _env_int("PAIRING_CODE", 411758)
+PULSES_PER_KWH   = _env_int("PULSES_PER_KWH", 3200)
+INTERVAL_MINUTES = _env_int("INTERVAL_MINUTES", 1)   # batch size in minutes (1-15)
+LIVE_PULSE       = _env_bool("LIVE_PULSE", False)    # per-pulse watts (more battery)
+RETRY_DELAY      = _env_int("RETRY_DELAY", 15)       # seconds between reconnects
 # ------------------------------------------------------------------------------
 
 CHAR_MEASUREMENT  = "59DA0001-12F4-25A6-7D4F-55961DCE4205"
