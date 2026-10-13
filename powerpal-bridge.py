@@ -17,6 +17,7 @@ Linux run:
 
 import asyncio
 import json
+import logging
 import os
 import struct
 import time
@@ -24,6 +25,7 @@ import sys
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from logging.handlers import TimedRotatingFileHandler
 
 from dotenv import load_dotenv
 from bleak import BleakScanner, BleakClient
@@ -52,9 +54,6 @@ INGEST_API_KEY   = os.environ.get("INGEST_API_KEY", "")
 STALE_SECONDS    = _env_int("STALE_SECONDS", 300)    # discard readings older than this
 # ------------------------------------------------------------------------------
 
-if not INGEST_API_KEY:
-    print("NOTE: INGEST_API_KEY not set -- readings will only be shown, not posted.")
-
 CHAR_MEASUREMENT  = "59DA0001-12F4-25A6-7D4F-55961DCE4205"
 CHAR_TIME         = "59DA0004-12F4-25A6-7D4F-55961DCE4205"
 CHAR_SERIAL       = "59DA0010-12F4-25A6-7D4F-55961DCE4205"
@@ -73,6 +72,23 @@ def dec_u16(d):  return struct.unpack("<H", d[:2])[0]
 def dec_u32(d):  return struct.unpack("<I", d[:4])[0]
 def dec_i8(d):   return struct.unpack("<b", d[:1])[0]
 
+def setup_logger():
+    logger = logging.getLogger("my_logger")
+    logger.setLevel(logging.INFO)
+    handler = TimedRotatingFileHandler(
+        "powerpal-bridge.log", when="midnight", backupCount=7, encoding="utf-8"
+    )
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    logger.propagate = False
+    return logger
+
+logger = setup_logger()
+
+if not INGEST_API_KEY:
+    logger.warning("INGEST_API_KEY not set -- readings will only be shown, not posted.")
+
 # -- Ingest POST ----------------------------------------------------------------
 _outbox  = []
 _last_ts = 0
@@ -89,16 +105,16 @@ def post_reading(payload):
         with urllib.request.urlopen(req, timeout=10) as resp:
             ok = 200 <= resp.status < 300
             if not ok:
-                print("  [INGEST] HTTP %s" % resp.status)
+                logger.error("[INGEST] HTTP %s", resp.status)
             return ok
     except urllib.error.HTTPError as e:
-        print("  [INGEST] HTTP error %s: %s" % (e.code, e.reason))
+        logger.error("[INGEST] HTTP error %s: %s", e.code, e.reason)
         return False
     except urllib.error.URLError as e:
-        print("  [INGEST] server unreachable: %s" % e.reason)
+        logger.error("[INGEST] server unreachable: %s", e.reason)
         return False
     except Exception as e:
-        print("  [INGEST] unexpected error: %s" % e)
+        logger.error("[INGEST] unexpected error: %s", e)
         return False
 
 def send_reading(payload):
@@ -112,8 +128,8 @@ def send_reading(payload):
     _outbox.append(payload)
     if len(_outbox) > 720:  # ~12 h of minute data, then drop the oldest
         dropped = _outbox.pop(0)
-        print("  [INGEST] outbox overflow, dropping reading at %s" % dropped["time"])
-    print("  [INGEST] queued for retry (%d in outbox)" % len(_outbox))
+        logger.warning("[INGEST] outbox overflow, dropping reading at %s", dropped["time"])
+    logger.warning("[INGEST] queued for retry (%d in outbox)", len(_outbox))
 
 def ms_to_watts(millis):
     if millis <= 0:
@@ -138,20 +154,20 @@ def on_measurement(sender, data):
 
     now = int(time.time())
     if ts > now + 120:
-        print("  [%s] skipped future-dated reading (ts=%d)" % (datetime.now().strftime("%H:%M:%S"), ts))
+        logger.warning("skipped future-dated reading (ts=%d)", ts)
         return
     if now - ts > STALE_SECONDS:
-        print("  [%s] skipped stale/historic reading (ts=%d, %ds old)" % (datetime.now().strftime("%H:%M:%S"), ts, now - ts))
+        logger.warning("skipped stale/historic reading (ts=%d, %ds old)", ts, now - ts)
         return
     if _last_ts and ts <= _last_ts:
-        print("  [%s] skipped duplicate/out-of-order reading (ts=%d)" % (datetime.now().strftime("%H:%M:%S"), ts))
+        logger.warning("skipped duplicate/out-of-order reading (ts=%d)", ts)
         return
     _last_ts = ts
 
     kwh    = pulses / PULSES_PER_KWH
     watts  = pulses_to_watts(pulses)
     dt     = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
-    print("  [%s] #%4d  device_ts=%s  pulses=%5d  %.4f kWh  %8.1f W avg" % (datetime.now().strftime("%H:%M:%S"), _meas_count, dt, pulses, kwh, watts))
+    logger.info("#%4d  device_ts=%s  pulses=%5d  %.4f kWh  %8.1f W avg", _meas_count, dt, pulses, kwh, watts)
 
     if not INGEST_API_KEY:
         return  # console-only mode
@@ -167,11 +183,10 @@ def on_pulse(sender, data):
     _pulse_count += 1
     last = getattr(on_pulse, "_last_ts", 0)
     ts = dec_u32(data[0:4])
-    now = datetime.now().strftime("%H:%M:%S")
     if last > 0:
         interval_ms = (ts - last) * 1000
         watts = ms_to_watts(interval_ms) if interval_ms > 0 else 0
-        print("  [PULSE %s] #%4d  %8.1f W instantaneous" % (now, _pulse_count, watts))
+        logger.info("[PULSE] #%4d  %8.1f W instantaneous", _pulse_count, watts)
     on_pulse._last_ts = ts
 
 # -- Scan until found ----------------------------------------------------------
@@ -179,26 +194,24 @@ async def scan_until_found():
     attempt = 0
     while True:
         attempt += 1
-        print("Scan #%d -- looking for %s..." % (attempt, POWERPAL_MAC))
+        logger.info("Scan #%d -- looking for %s...", attempt, POWERPAL_MAC)
         device = await BleakScanner.find_device_by_address(POWERPAL_MAC, timeout=8.0)
         if device is not None:
-            print("Found: %s (%s)" % (device.address, device.name))
-            print()
+            logger.info("Found: %s (%s)", device.address, device.name)
             return device
-        print("   Not found -- retrying in %ds..." % RETRY_DELAY)
+        logger.info("Not found -- retrying in %ds...", RETRY_DELAY)
         await asyncio.sleep(RETRY_DELAY)
 
 # -- Single connection session -------------------------------------------------
 async def connect_once(device, reconnect_num):
     pair_before = sys.platform == "win32"
-    print("Connecting to %s (%s)..." % (device.address, device.name))
+    logger.info("Connecting to %s (%s)...", device.address, device.name)
 
     async with BleakClient(device, timeout=20.0, pair_before_connect=pair_before, dangerous_use_bleak_cache=True) as client:
         if not client.is_connected:
             raise Exception("connect() returned but is_connected is False")
 
-        print("Connected!")
-        print()
+        logger.info("Connected!")
 
         if reconnect_num == 0:
             firmware = serial = "unknown"
@@ -215,60 +228,49 @@ async def connect_once(device, reconnect_num):
                 serial = dec_u32(await client.read_gatt_char(CHAR_SERIAL))
             except Exception:
                 pass
-            print("Device Info")
-            print("   Serial   : %s" % serial)
-            print("   Firmware : %s" % firmware)
-            print("   Battery  : %d%%" % battery)
-            print()
+            logger.info("Device Info -- serial=%s firmware=%s battery=%d%%", serial, firmware, battery)
 
         await client.write_gatt_char(CHAR_PAIRING_CODE, enc_u32(PAIRING_CODE), response=True)
-        print("Authenticated")
+        logger.info("Authenticated")
 
         now = int(time.time())
         await client.write_gatt_char(CHAR_TIME, enc_u32(now), response=True)
-        print("Time synced: %s" % datetime.fromtimestamp(now).strftime("%H:%M:%S"))
+        logger.info("Time synced: %s", datetime.fromtimestamp(now).strftime("%H:%M:%S"))
 
         await client.write_gatt_char(CHAR_BATCH_SIZE, enc_u32(INTERVAL_MINUTES), response=True)
-        print("Interval: %d min" % INTERVAL_MINUTES)
+        logger.info("Interval: %d min", INTERVAL_MINUTES)
 
         try:
             ms = dec_u32(await client.read_gatt_char(CHAR_MILLIS_PULSE))
-            print("Instantaneous: %.1f W" % ms_to_watts(ms))
+            logger.info("Instantaneous: %.1f W", ms_to_watts(ms))
         except Exception:
             pass
-        print()
 
         await client.start_notify(CHAR_MEASUREMENT, on_measurement)
 
         if LIVE_PULSE:
             try:
                 await client.start_notify(CHAR_PULSE, on_pulse)
-                print("Per-pulse notifications active")
+                logger.info("Per-pulse notifications active")
             except Exception as e:
-                print("Pulse subscribe failed: %s" % e)
+                logger.error("Pulse subscribe failed: %s", e)
 
-        print("Streaming (every %d min -- Ctrl+C to stop):" % INTERVAL_MINUTES)
-        print("   %10s  %5s  %-22s  %6s  %8s  %10s" % ("Time", "#", "Device TS", "Pulses", "kWh", "Watts avg"))
-        print("   " + "-" * 72)
+        logger.info("Streaming (every %d min -- Ctrl+C to stop)", INTERVAL_MINUTES)
 
         while client.is_connected:
             await asyncio.sleep(1)
 
-        print()
-        print("Device dropped connection (normal) -- reconnecting in %ds..." % RETRY_DELAY)
+        logger.info("Device dropped connection (normal) -- reconnecting in %ds...", RETRY_DELAY)
 
 # -- Main loop -----------------------------------------------------------------
 async def main():
-    print("=" * 55)
-    print("  Powerpal BLE Client  (Standalone)")
-    print("=" * 55)
-    print("  MAC            : %s" % POWERPAL_MAC)
-    print("  Pairing code   : %d" % PAIRING_CODE)
-    print("  Pulses/kWh     : %d" % PULSES_PER_KWH)
-    print("  Interval       : %d min" % INTERVAL_MINUTES)
-    print("  Ingest         : %s" % (INGEST_URL if INGEST_API_KEY else "disabled (no INGEST_API_KEY)"))
-    print("  Platform       : %s" % ("Windows" if sys.platform == "win32" else "Linux"))
-    print()
+    logger.info("Powerpal BLE Client (Standalone)")
+    logger.info("  MAC            : %s", POWERPAL_MAC)
+    logger.info("  Pairing code   : %d", PAIRING_CODE)
+    logger.info("  Pulses/kWh     : %d", PULSES_PER_KWH)
+    logger.info("  Interval       : %d min", INTERVAL_MINUTES)
+    logger.info("  Ingest         : %s", INGEST_URL if INGEST_API_KEY else "disabled (no INGEST_API_KEY)")
+    logger.info("  Platform       : %s", "Windows" if sys.platform == "win32" else "Linux")
 
     reconnect_num = 0
     while True:
@@ -278,15 +280,14 @@ async def main():
         except asyncio.CancelledError:
             break
         except Exception as e:
-            print("Error: %s" % e)
+            logger.exception("Error: %s", e)
 
         reconnect_num += 1
-        print("Reconnect attempt #%d in %ds..." % (reconnect_num, RETRY_DELAY))
+        logger.info("Reconnect attempt #%d in %ds...", reconnect_num, RETRY_DELAY)
         await asyncio.sleep(RETRY_DELAY)
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print()
-        print("Exited. Total measurements: %d" % _meas_count)
+        logger.info("Exited. Total measurements: %d", _meas_count)
